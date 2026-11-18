@@ -1,0 +1,79 @@
+name: Novachi sender
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: novachi-sender
+  cancel-in-progress: false
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      early: ${{ steps.p.outputs.early }}
+      day: ${{ steps.p.outputs.day }}
+      probe: ${{ steps.p.outputs.probe }}
+    steps:
+      - id: p
+        env:
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Commit message tags: [early:<list>:<cap>] runs a morning round, [day:<list>:<cap>] a daytime round,
+          # [batch:<list>] [cap:<n>] is the older single-round form, [probe] checks the connection and sends nothing.
+          early=$(echo "$MSG" | grep -o '\[early:[^]]*\]' | head -1 | sed 's/^\[early:\(.*\)\]$/\1/')
+          day=$(echo "$MSG" | grep -o '\[day:[^]]*\]' | head -1 | sed 's/^\[day:\(.*\)\]$/\1/')
+          b=$(echo "$MSG" | grep -o '\[batch:[^]]*\]' | head -1 | sed 's/^\[batch:\(.*\)\]$/\1/')
+          c=$(echo "$MSG" | grep -o '\[cap:[0-9]*\]' | head -1 | tr -dc 0-9)
+          if [ -z "$early$day" ] && [ -n "$b" ]; then day="$b:${c:-100}"; fi
+          probe=0; case "$MSG" in *"[probe]"*) probe=1;; esac
+          echo "early=$early" >> "$GITHUB_OUTPUT"; echo "day=$day" >> "$GITHUB_OUTPUT"; echo "probe=$probe" >> "$GITHUB_OUTPUT"
+          echo "Morning round: ${early:-none}. Daytime round: ${day:-none}. Probe: $probe"
+  early:
+    needs: plan
+    if: needs.plan.outputs.early != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Morning round
+        env:
+          BYPASS: ${{ secrets.VERCEL_BYPASS }}
+          BASE: ${{ secrets.ENGINE_URL }}
+          PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          PROBE: ${{ needs.plan.outputs.probe }}
+          ROUND: ${{ needs.plan.outputs.early }}
+        # Stops itself before the job's 355 minute limit, so a long morning never cancels the daytime round.
+        run: |
+          rc=0; timeout 340m bash send.sh "${ROUND%%:*}" "${ROUND##*:}" || rc=$?
+          if [ "$rc" = "124" ]; then echo "Morning round stopped at its time limit."; exit 0; fi
+          exit $rc
+  pause:
+    # Waits until 9:50 New York in its own job, so the daytime round starts fresh
+    # and its 355 minute limit covers the whole 10:00 to 15:00 window.
+    needs: [plan, early]
+    if: always() && needs.plan.outputs.day != '' && needs.plan.outputs.probe != '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Wait for the daytime window
+        run: |
+          while :; do
+            hm=$(TZ=America/New_York date +%H%M)
+            if [ "$((10#$hm))" -ge 950 ]; then break; fi
+            sleep 60
+          done
+          echo "Daytime window opens at 10:00 New York. Now $(TZ=America/New_York date +%H:%M)."
+  day:
+    needs: [plan, early, pause]
+    if: always() && needs.plan.outputs.day != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Daytime round
+        env:
+          BYPASS: ${{ secrets.VERCEL_BYPASS }}
+          BASE: ${{ secrets.ENGINE_URL }}
+          PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          PROBE: ${{ needs.plan.outputs.probe }}
+          ROUND: ${{ needs.plan.outputs.day }}
+        run: bash send.sh "${ROUND%%:*}" "${ROUND##*:}"
