@@ -1,0 +1,19 @@
+name: Inbound test
+on:
+  push:
+    branches: [tmp/inbound-test]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          BYPASS: ${{ secrets.VERCEL_BYPASS }}
+          BASE: ${{ secrets.ENGINE_URL }}
+        run: |
+          sleep 60
+          echo "Preflight:"; curl -s -o /dev/null -w "%{http_code}\n" -X OPTIONS -H "x-vercel-protection-bypass: $BYPASS" -H "Origin: https://www.novachigroup.com" "$BASE/api/inbound"
+          echo "Test lead:"
+          date -u +%T
+          curl -s -X POST "$BASE/api/inbound" -H "x-vercel-protection-bypass: $BYPASS" -H "Content-Type: application/json" -H "Origin: https://www.novachigroup.com" \
+            -d '{"brand":"qivo","name":"Princess Udeani","email":"princess@gettruvasse.com","phone":"+14049173101","company":"Novachi Group","country":"United States","message":"Speed to lead test. I would like a Qivo demo for my team.","source":"go-live test"}'
+          echo; date -u +%T
